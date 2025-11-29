@@ -1,0 +1,136 @@
+---
+- name: Configure Ubuntu VM
+  hosts: all
+  become: true
+
+  tasks:
+    # --- System update/upgrade ---
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        force_apt_get: yes
+
+    # --- Create user rg ---
+    - name: Ensure user rg exists
+      user:
+        name: rg
+        groups: sudo
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Set passwordless sudo for rg
+      copy:
+        dest: /etc/sudoers.d/rg
+        content: "rg ALL=(ALL) NOPASSWD:ALL\n"
+        mode: '0440'
+
+    - name: Copy vagrant SSH key to rg
+      authorized_key:
+        user: rg
+        state: present
+        key: "{{ lookup('file', '/home/vagrant/.ssh/authorized_keys') }}"
+
+    # --- Set hostname ---
+    - name: Set hostname to controller
+      hostname:
+        name: controller
+
+    # --- Install Samba ---
+    - name: Install Samba
+      apt:
+        name: samba
+        state: present
+
+    - name: Create share directory
+      file:
+        path: /home/rg/share
+        state: directory
+        owner: rg
+        group: rg
+        mode: '0755'
+
+    - name: Configure Samba share
+      copy:
+        dest: /etc/samba/smb.conf
+        content: |
+          [global]
+          workgroup = WORKGROUP
+          server string = Controller VM
+          netbios name = controller
+          security = user
+          map to guest = Bad User
+
+          [share]
+          path = /home/rg/share
+          browseable = yes
+          read only = no
+          guest ok = yes
+      notify: Restart Samba
+
+    # --- Install Avahi (mDNS) ---
+    - name: Install Avahi daemon
+      apt:
+        name: avahi-daemon
+        state: present
+
+    - name: Enable and start Avahi
+      systemd:
+        name: avahi-daemon
+        enabled: true
+        state: started
+
+    # --- Install Docker for Swarm ---
+    - name: Install required packages for Docker
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker Engine
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+
+    - name: Add rg to docker group
+      user:
+        name: rg
+        groups: docker
+        append: yes
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Initialize Docker Swarm (only on controller)
+      command: docker swarm init
+      when: inventory_hostname == "controller"
+
+  handlers:
+    - name: Restart Samba
+      systemd:
+        name: smbd
+        state: restarted
